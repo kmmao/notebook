@@ -282,3 +282,179 @@ playwright-report/
 2. **data-testid是关键** — 在CLAUDE.md里规定用data-testid定位，否则AI可能用不稳定的选择器
 3. **不要测所有东西** — E2E只测主流程，细节逻辑用Vitest组件测试
 4. **测试也可能写错** — Claude Code修代码前要先判断是功能bug还是测试写错了
+
+---
+
+## UI视觉验证方案对比
+
+> 核心问题：页面"长得对不对"，怎么用自动化验证？
+
+### 三种验证方式
+
+#### 1. DOM断言（主力方式，推荐）
+
+不"看"页面，直接查HTML结构，验证元素、文本、状态：
+
+```typescript
+// 元素存不存在
+await expect(page.getByTestId('login-btn')).toBeVisible()
+
+// 文本对不对
+await expect(page.getByTestId('user-name')).toContainText('张三')
+
+// 数量对不对
+await expect(page.locator('tbody tr')).toHaveCount(10)
+
+// 状态对不对
+await expect(page.getByTestId('submit-btn')).toBeDisabled()
+
+// 关键样式对不对
+await expect(page.getByTestId('error-text')).toHaveCSS('color', 'rgb(255, 0, 0)')
+
+// URL跳转对不对
+await expect(page).toHaveURL('/dashboard')
+```
+
+**优点：** 极其稳定，不受环境、字体渲染、分辨率影响。
+**覆盖面：** 能覆盖99%的UI验证需求。
+
+#### 2. 截图像素对比（toHaveScreenshot，不推荐）
+
+拍截图和基准图逐像素对比：
+
+```typescript
+await expect(page).toHaveScreenshot('login-page.png')
+```
+
+**实际项目中的坑：**
+
+| 问题 | 说明 |
+|------|------|
+| 环境差异误报 | Mac/Linux/Windows字体渲染不同，同一代码截图不一样 |
+| 动态内容 | 时间戳、随机头像、广告位，每次截图都变 |
+| 维护噩梦 | 50个页面 × 3浏览器 = 150张基准图，每次UI调整都要更新 |
+| 一像素触发失败 | 改了按钮圆角4px→6px，几十张截图全部报错 |
+
+**结论：** 除非是纯UI组件库（Storybook）且在Docker统一环境下跑，否则不要用。
+
+#### 3. AI视觉验证（Claude Code看截图，推荐作为补充）
+
+Claude Code是多模态AI，能直接"看"Playwright截取的截图：
+
+```typescript
+// 测试中截图
+await page.screenshot({ path: 'test-results/current-page.png' })
+```
+
+然后Claude Code用Read工具读取截图，用视觉能力判断页面：
+
+```
+Claude Code内部流程：
+1. Playwright截图 → page.screenshot()
+2. Read('test-results/current-page.png')  ← 直接看图
+3. 视觉判断：布局对不对？元素都在吗？有没有明显错乱？
+4. 发现问题 → 修CSS → 重新截图 → 再看
+```
+
+**AI视觉能做到 vs 做不到：**
+
+| 能做到 | 做不到 |
+|--------|--------|
+| 看出元素有没有出现 | 精确判断间距16px还是18px |
+| 看出布局明显错乱（重叠、溢出） | 检测1-2px的对齐偏差 |
+| 看出颜色明显不对（红变蓝） | 判断颜色是#333还是#444 |
+| 看出页面空白/未加载 | 和设计稿精确像素级对比 |
+| 看出缺失的功能元素 | 判断字体是否完全一致 |
+
+### 商业AI视觉测试工具
+
+| 工具 | 特点 | 价格 |
+|------|------|------|
+| **Applitools Eyes** | AI理解布局，忽略动态内容和亚像素差异 | 贵，按截图量收费 |
+| **Percy (BrowserStack)** | 快照对比 + 审批流程 | 中等 |
+| **Chromatic (Storybook)** | 专为组件库设计 | 有免费额度 |
+
+大多数个人项目和中小团队不需要花这个钱。
+
+### 最佳实践：推荐组合
+
+```
+DOM断言（必选，基础）
+  验证功能对不对：元素存在、文本正确、状态正确
+  +
+AI视觉验证（推荐，补充）
+  验证长得对不对：截图 → Claude Code看 → 判断布局
+```
+
+#### CLAUDE.md 配置模板（加入AI视觉验证）
+
+```markdown
+## UI验证（开发完页面后执行）
+
+### 第一步：Playwright DOM断言
+- 验证关键元素可见（toBeVisible）
+- 验证文本内容正确（toContainText）
+- 验证交互行为正确（点击后状态变化）
+- 验证异常路径有反馈
+
+### 第二步：AI视觉验证
+- 用 page.screenshot() 截取页面截图
+- 用 Read 工具查看截图
+- 用视觉能力检查：
+  - 布局是否合理（没有重叠、溢出、大面积空白）
+  - 关键元素是否可见且位置正确
+  - 没有明显样式错误（空白页、错位、乱码）
+- 发现视觉问题则修复后重新截图验证
+
+### 不要用截图像素对比（toHaveScreenshot）
+- 环境差异导致大量误报
+- 维护成本极高
+- 用DOM断言 + AI视觉验证替代
+```
+
+#### 完整测试示例
+
+```typescript
+import { test, expect } from '@playwright/test'
+
+test.describe('用户列表页面', () => {
+  // DOM断言：验证功能
+  test('正确显示用户列表', async ({ page }) => {
+    await page.goto('/users')
+
+    // 表头
+    await expect(page.getByText('用户名')).toBeVisible()
+    await expect(page.getByText('邮箱')).toBeVisible()
+
+    // 数据
+    const rows = page.locator('tbody tr')
+    await expect(rows).toHaveCount(10)
+    await expect(rows.first()).toContainText('admin')
+  })
+
+  // DOM断言：验证交互
+  test('搜索用户', async ({ page }) => {
+    await page.goto('/users')
+    await page.getByTestId('search-input').fill('张三')
+    await page.getByTestId('search-btn').click()
+
+    await expect(page.locator('tbody tr')).toHaveCount(1)
+    await expect(page.locator('tbody tr').first()).toContainText('张三')
+  })
+
+  // AI视觉验证：截图供Claude Code查看
+  test('页面视觉检查', async ({ page }) => {
+    await page.goto('/users')
+    // 等待数据加载完成
+    await expect(page.locator('tbody tr')).toHaveCount(10)
+    // 截图供AI视觉验证
+    await page.screenshot({
+      path: 'test-results/users-page.png',
+      fullPage: true
+    })
+  })
+})
+```
+
+Claude Code跑完测试后，会自动Read截图文件，用视觉能力做最终检查。
+如果看到明显的布局问题（元素重叠、内容溢出、样式错乱），会自行修复并重新验证。
